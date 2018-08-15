@@ -12,15 +12,9 @@ full implementation of the Ethereum protocol from scratch for python
 Installation / Usage
 --------------------
 
-To install use pip:
+    $ pip install -r requirements.txt
+    $ python send_ping.py
 
-    $ pip install pyeth
-
-
-Or clone the repo:
-
-    $ git clone https://github.com/HuangFJ/pyeth.git
-    $ python setup.py install
     
 Contributing
 ------------
