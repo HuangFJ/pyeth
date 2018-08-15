@@ -3,15 +3,16 @@ from pyeth.discovery import EndPoint, PingNode, Server, FindNeighbors, Node
 import time
 import binascii
 
-bootnode_key = "3f1d12044546b76342d59d4a05532c14b85aa669704bfe1f864fe079415aa2c02d743e03218e57a33fb94523adb54032871a6c51b2cc5514cb7c7e35b3ed0a99"
+bootnode_key = "1118980bf48b0a3640bdba04e0fe78b1add18e1cd99bf22d53daac1fd9972ad650df52176e7c7d89d1114cfef2bc23a2959aa54998a46afcf7d91809f0855082"
 
-bootnode_endpoint = EndPoint(u'13.93.211.84',
+bootnode_endpoint = EndPoint(u'52.74.57.123',
                              30303,
                              30303)
 
 bootnode = Node(bootnode_endpoint,
                 binascii.a2b_hex(bootnode_key))
 
+# this is a fake ip address used in packets.
 my_endpoint = EndPoint(u'52.4.20.183', 30303, 30303)
 server = Server(my_endpoint)
 

@@ -186,14 +186,14 @@ class Server(object):
             if ready[0]:
                 data, addr = self.sock.recvfrom(2048)
                 print "received message[", addr, "]:"
-                self.receive(data)
+                self.receive(data, addr)
 
     def listen_thread(self):
         thread = threading.Thread(target=self.listen)
         thread.daemon = True
         return thread
 
-    def receive(self, data):
+    def receive(self, data, addr):
         # verify hash
         msg_hash = data[:32]
         if msg_hash != keccak256(data[32:]):
@@ -240,24 +240,25 @@ class Server(object):
             return
 
         payload = data[98:]
-        dispatch(payload, msg_hash)
+        dispatch(payload, msg_hash, addr)
 
-    def receive_pong(self, payload, msg_hash):
+    def receive_pong(self, payload, msg_hash, addr):
         print " received Pong"
         print "", Pong.unpack(rlp.decode(payload))
 
-    def receive_ping(self, payload, msg_hash):
+    def receive_ping(self, payload, msg_hash, addr):
         print " received Ping"
         ping = PingNode.unpack(rlp.decode(payload))
-        pong = Pong(ping.endpoint_from, msg_hash, time.time() + 60)
+        endpoint_to = EndPoint(addr[0], ping.endpoint_from.udpPort, ping.endpoint_from.tcpPort)
+        pong = Pong(endpoint_to, msg_hash, time.time() + 60)
         print "  sending Pong response: " + str(pong)
         self.send(pong, pong.to)
 
-    def receive_find_neighbors(self, payload, msg_hash):
+    def receive_find_neighbors(self, payload, msg_hash, addr):
         print " received FindNeighbors"
         print "", FindNeighbors.unpack(rlp.decode(payload))
 
-    def receive_neighbors(self, payload, msg_hash):
+    def receive_neighbors(self, payload, msg_hash, addr):
         print " received Neighbors"
         print "", Neighbors.unpack(rlp.decode(payload))
 
