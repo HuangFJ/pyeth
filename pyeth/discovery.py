@@ -12,7 +12,25 @@ import select
 
 
 class EndPoint(object):
+    """
+    struct Endpoint             <= 24 == [17,3,3]
+    {
+        unsigned address; // BE encoded 32-bit or 128-bit unsigned (layer3 address; size determins ipv4 vs ipv6)
+        unsigned udpPort; // BE encoded 16-bit unsigned
+        unsigned tcpPort; // BE encoded 16-bit unsigned
+    }
+    """
     def __init__(self, address, udpPort, tcpPort):
+        """
+        :param address: compatible with 
+        (str bytes)'192.168.1.1',
+        (unicode)u'192.168.1.1',
+        (int bytes)'\xab\x23\x65\x23',
+        (int) 1232345
+        """
+        if isinstance(address, bytes) and len(address) > 4:
+            address = address.decode('utf8')
+
         self.address = ip_address(address)
         self.udpPort = udpPort
         self.tcpPort = tcpPort
@@ -36,6 +54,24 @@ class EndPoint(object):
 
 
 class PingNode(object):
+    """
+    ### Ping (type 0x01)
+
+    Ping packets can be sent and received at any time. The receiver should
+    reply with a Pong packet and update the IP/Port of the sender in its
+    node table.
+
+    PingNode packet-type: 0x01
+
+    PingNode packet-type: 0x01
+    struct PingNode             <= 59 bytes
+    {
+        h256 version = 0x3;     <= 1
+        Endpoint from;          <= 23
+        Endpoint to;            <= 23
+        unsigned expiration;    <= 9
+    };
+    """
     packet_type = '\x01'
     version = '\x03'
 
@@ -64,6 +100,19 @@ class PingNode(object):
 
 
 class Pong(object):
+    """
+    ### Pong (type 0x02)
+
+    Pong is the reply to a Ping packet.
+
+    Pong packet-type: 0x02
+    struct Pong                 <= 66 bytes
+    {
+        Endpoint to;
+        h256 echo;
+        unsigned expiration;
+    };
+    """
     packet_type = '\x02'
 
     def __init__(self, to, echo, timestamp):
@@ -89,6 +138,20 @@ class Pong(object):
 
 
 class FindNeighbors(object):
+    """
+    ### Find Node (type 0x03)
+
+    Find Node packets are sent to locate nodes close to a given target ID.
+    The receiver should reply with a Neighbors packet containing the `k`
+    nodes closest to target that it knows about.
+
+    FindNode packet-type: 0x03
+    struct FindNode             <= 76 bytes
+    {
+        NodeId target; // Id of a node. The responding node will send back nodes closest to the target.
+        unsigned expiration;
+    };
+    """
     packet_type = '\x03'
 
     def __init__(self, target, timestamp):
@@ -111,6 +174,24 @@ class FindNeighbors(object):
 
 
 class Neighbors(object):
+    """
+    ### Neighbors (type 0x04)
+
+    Neighbors is the reply to Find Node. It contains up to `k` nodes that
+    the sender knows which are closest to the requested `Target`.
+
+    Neighbors packet-type: 0x04
+    struct Neighbours           <= 1423
+    {
+        list nodes: struct Neighbour    <= 88: 1411; 76: 1219
+        {
+            inline Endpoint endpoint;
+            NodeId node;
+        };
+
+        unsigned expiration;
+    };
+    """
     packet_type = '\x04'
 
     def __init__(self, nodes, timestamp):
@@ -170,6 +251,34 @@ class Server(object):
         self.sock.setblocking(0)
 
     def wrap_packet(self, packet):
+        """
+        UDP packets are structured as follows:
+
+        hash || signature || packet-type || packet-data
+        packet-type: single byte < 2**7 // valid values are [1,4]
+        packet-data: RLP encoded list. Packet properties are serialized in the order in
+                    which they're defined. See packet-data below.
+
+        Offset  |
+        0       | MDC       | Ensures integrity of packet,
+        65      | signature | Ensures authenticity of sender, `SIGN(sender-privkey, MDC)`
+        97      | type      | Single byte in range [1, 4] that determines the structure of Data
+        98      | data      | RLP encoded, see section Packet Data
+
+        The packets are signed and authenticated. The sender's Node ID is determined by
+        recovering the public key from the signature.
+
+            sender-pubkey = ECRECOVER(Signature)
+
+        The integrity of the packet can then be verified by computing the
+        expected MDC of the packet as:
+
+            MDC = SHA3(sender-pubkey || type || data)
+
+        As an optimization, implementations may look up the public key by
+        the UDP sending address and compute MDC before recovering the sender ID.
+        If the MDC values do not match, the packet can be dropped.
+                """
         payload = packet.packet_type + rlp.encode(packet.pack())
         sig = self.priv_key.ecdsa_sign_recoverable(keccak256(payload),
                                                    raw=True)
@@ -194,6 +303,13 @@ class Server(object):
         return thread
 
     def receive(self, data, addr):
+        """
+        macSize  = 256 / 8 = 32
+        sigSize  = 520 / 8 = 65
+        headSize = macSize + sigSize = 97
+        hash, sig, sigdata := buf[:macSize], buf[macSize:headSize], buf[headSize:]
+        shouldhash := crypto.Sha3(buf[macSize:])
+        """
         # verify hash
         msg_hash = data[:32]
         if msg_hash != keccak256(data[32:]):
