@@ -1,14 +1,50 @@
 # -*- coding: utf8 -*-
 import socket
-import threading
+import gevent
+from gevent.queue import Queue
+from gevent.event import Event
+from gevent.select import select
 import time
 import struct
 import rlp
-from crypto import keccak256
+from crypto import keccak256, pubkey_format
+from table import RoutingTable
 from secp256k1 import PrivateKey, PublicKey
 from ipaddress import ip_address
 import binascii
-import select
+import logging
+import sys
+
+LOGGER = logging.getLogger()
+LOGGER.setLevel(logging.DEBUG)
+ch = logging.StreamHandler(sys.stdout)
+ch.setLevel(logging.DEBUG)
+LOGGER.addHandler(ch)
+
+K_REQUEST_TIMEOUT = 1.0
+K_BOND_EXPIRATION = 86400
+K_EXPIRATION = 20
+K_BUCKET_SIZE = 16
+
+
+class Pending(object):
+    def __init__(self, from_id, packet_type, callback, deadline=None):
+        self.from_id = from_id
+        self.packet_type = packet_type
+        self.callback = callback
+        self.deadline = deadline
+
+
+class Reply(object):
+    def __init__(self, from_id, packet_type, data, matcher=None):
+        self.from_id = from_id
+        self.packet_type = packet_type
+        self.data = data
+        self.matcher = matcher
+
+
+class TimeBomb(object):
+    pass
 
 
 class EndPoint(object):
@@ -20,6 +56,7 @@ class EndPoint(object):
         unsigned tcpPort; // BE encoded 16-bit unsigned
     }
     """
+
     def __init__(self, address, udpPort, tcpPort):
         """
         :param address: compatible with 
@@ -73,7 +110,7 @@ class PingNode(object):
     };
     """
     packet_type = '\x01'
-    version = '\x03'
+    version = '\x04'
 
     def __init__(self, endpoint_from, endpoint_to, timestamp):
         self.endpoint_from = endpoint_from
@@ -215,16 +252,18 @@ class Neighbors(object):
 
 
 class Node(object):
-    def __init__(self, endpoint, node):
+    def __init__(self, endpoint, node_key):
         self.endpoint = endpoint
-        self.node = node
+        self.node_key = node_key
+        self.node_id = keccak256(self.node_key)
+        self.added_time = Node
 
     def __str__(self):
-        return "(N " + binascii.b2a_hex(self.node)[:7] + "...)"
+        return "(N " + binascii.b2a_hex(self.node_key)[:7] + "...)"
 
     def pack(self):
         packed = self.endpoint.pack()
-        packed.append(self.node)
+        packed.append(self.node_key)
         return packed
 
     @classmethod
@@ -234,21 +273,69 @@ class Node(object):
 
 
 class Server(object):
-    def __init__(self, my_endpoint):
-        self.endpoint = my_endpoint
+    def __init__(self, boot_nodes):
+        # the endpoint of this server
+        # this is a fake ip address used in packets.
+        self.endpoint = EndPoint(u'127.0.0.1', 30303, 30303)
+        # boot nodes
+        self.boot_nodes = boot_nodes
+        # event queue collecting Pending, Reply or TimeBomb
+        self.events = Queue()
+        # last pong received time of the special node id
+        self.last_pong_received = {}
+        # last ping received time of the special node id
+        self.last_ping_received = {}
 
-        # 获取私钥
+        # have the private key
         priv_key_file = open('priv_key', 'r')
         priv_key_serialized = priv_key_file.read()
         priv_key_file.close()
         self.priv_key = PrivateKey()
         self.priv_key.deserialize(priv_key_serialized)
 
-        # 初始化套接字
+        # routing table
+        self.table = RoutingTable(Node(self.endpoint, pubkey_format(self.priv_key.pubkey)))
+
+        # initialize UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(('0.0.0.0', self.endpoint.udpPort))
         # set socket non-blocking mode
         self.sock.setblocking(0)
+
+    def poll(self):
+        """
+        loop consuming the event queue
+        
+        """
+        pending_list = []
+
+        self.events.put(TimeBomb())
+        while True:
+            event = self.events.get()
+
+            if isinstance(event, Reply):
+                for pending in list(pending_list):
+                    if pending.from_id == event.from_id and pending.packet_type == event.packet_type:
+                        if event.matcher:
+                            event.matcher()
+                        if pending.callback(event.data):
+                            pending_list.remove(pending)
+
+            elif isinstance(event, Pending):
+                event.deadline = time.time() + K_REQUEST_TIMEOUT
+                pending_list.append(event)
+
+            elif isinstance(event, TimeBomb):
+                now = time.time()
+                dist = K_REQUEST_TIMEOUT
+
+                for pending in list(pending_list):
+                    dist = pending.deadline - now
+                    if dist > 0:
+                        break
+                    pending_list.remove(pending)
+
+                gevent.spawn_later(dist, lambda: self.events.put(TimeBomb()))
 
     def wrap_packet(self, packet):
         """
@@ -289,18 +376,27 @@ class Server(object):
         return payload_hash + payload
 
     def listen(self):
-        print "listening..."
+        LOGGER.info("listening...")
         while True:
-            ready = select.select([self.sock], [], [], 1.0)
+            ready = select([self.sock], [], [], 1.0)
             if ready[0]:
                 data, addr = self.sock.recvfrom(2048)
-                print "received message[", addr, "]:"
+                LOGGER.debug("<<< message[{}]:".format(addr))
                 self.receive(data, addr)
 
-    def listen_thread(self):
-        thread = threading.Thread(target=self.listen)
-        thread.daemon = True
-        return thread
+    def run(self):
+        gevent.spawn(self.listen)
+        gevent.spawn(self.poll)
+
+        def routine():
+            boot_node = self.boot_nodes[0]
+            self.find_neighbors(boot_node, boot_node.node_key)
+
+        gevent.spawn_later(1, routine)
+
+        # wait forever
+        evt = Event()
+        evt.wait()
 
     def receive(self, data, addr):
         """
@@ -312,11 +408,7 @@ class Server(object):
         """
         # verify hash
         msg_hash = data[:32]
-        if msg_hash != keccak256(data[32:]):
-            print " First 32 bytes are not keccak256 hash of the rest."
-            return
-        else:
-            print " Verified message hash."
+        assert msg_hash == keccak256(data[32:]), "First 32 bytes are not keccak256 hash of the rest"
 
         # verify signature
         signature = data[32:97]
@@ -335,56 +427,135 @@ class Server(object):
                                     pub.ecdsa_recoverable_convert(deserialized_sig),
                                     raw=True)
 
-        if not verified:
-            print " Signature invalid"
-            return
+        assert verified, "Signature invalid"
+
+        pubkey = pubkey_format(pub)[1:]
+        LOGGER.debug(" remote PubKey {}".format(binascii.hexlify(pubkey)))
+
+        packet_type = data[97]
+        payload = rlp.decode(data[98:])
+        if packet_type == PingNode.packet_type:
+            ping = PingNode.unpack(payload)
+            if expired(ping):
+                return
+            LOGGER.debug(" received {}".format(ping))
+            self.receive_ping(ping, msg_hash, addr, pubkey)
+        elif packet_type == Pong.packet_type:
+            pong = Pong.unpack(payload)
+            if expired(pong):
+                return
+            LOGGER.debug(" received {}".format(pong))
+            self.receive_pong(pong, pubkey)
+        elif packet_type == FindNeighbors.packet_type:
+            fn = FindNeighbors.unpack(payload)
+            if expired(fn):
+                return
+            LOGGER.debug(" received {}".format(fn))
+            self.receive_find_neighbors(fn, pubkey)
+        elif packet_type == Neighbors.packet_type:
+            neighbours = Neighbors.unpack(payload)
+            if expired(neighbours):
+                return
+            LOGGER.debug(" received {}".format(neighbours))
+            self.receive_neighbors(neighbours, pubkey)
         else:
-            print " Verified signature."
+            assert False, " Unknown message type: {}".format(packet_type)
 
-        response_types = {
-            PingNode.packet_type: self.receive_ping,
-            Pong.packet_type: self.receive_pong,
-            FindNeighbors.packet_type: self.receive_find_neighbors,
-            Neighbors.packet_type: self.receive_neighbors
-        }
+    def receive_pong(self, pong, pubkey):
+        remote_id = keccak256(pubkey)
+        # response to ping
+        last_pong_received = self.last_pong_received
 
-        try:
-            packet_type = data[97]
-            dispatch = response_types[packet_type]
-        except KeyError:
-            print " Unknown message type: " + data[97]
-            return
+        def matcher():
+            # solicited reply
+            last_pong_received[remote_id] = time.time()
 
-        payload = data[98:]
-        dispatch(payload, msg_hash, addr)
+        self.events.put(Reply(remote_id, Pong.packet_type, pong, matcher))
 
-    def receive_pong(self, payload, msg_hash, addr):
-        print " received Pong"
-        print "", Pong.unpack(rlp.decode(payload))
-
-    def receive_ping(self, payload, msg_hash, addr):
-        print " received Ping"
-        ping = PingNode.unpack(rlp.decode(payload))
+    def receive_ping(self, ping, msg_hash, addr, pubkey):
+        remote_id = keccak256(pubkey)
         endpoint_to = EndPoint(addr[0], ping.endpoint_from.udpPort, ping.endpoint_from.tcpPort)
-        pong = Pong(endpoint_to, msg_hash, time.time() + 60)
-        print "  sending Pong response: " + str(pong)
+        pong = Pong(endpoint_to, msg_hash, time.time() + K_EXPIRATION)
+        # sending Pong response
         self.send(pong, pong.to)
 
-    def receive_find_neighbors(self, payload, msg_hash, addr):
-        print " received FindNeighbors"
-        print "", FindNeighbors.unpack(rlp.decode(payload))
+        self.events.put(Reply(remote_id, PingNode.packet_type, ping))
 
-    def receive_neighbors(self, payload, msg_hash, addr):
-        print " received Neighbors"
-        print "", Neighbors.unpack(rlp.decode(payload))
+        node = Node(endpoint_to, pubkey)
+        if time.time() - self.last_pong_received.get(remote_id, 0) > K_BOND_EXPIRATION:
+            self.ping(node, lambda: self.add_table(node))
+        else:
+            self.add_table(node)
 
-    def ping(self, endpoint):
-        ping = PingNode(self.endpoint, endpoint, time.time() + 60)
+        self.last_ping_received[remote_id] = time.time()
+
+    def receive_find_neighbors(self, fn, pubkey):
+        remote_id = keccak256(pubkey)
+        if time.time() - self.last_pong_received.get(remote_id, 0) > K_BOND_EXPIRATION:
+            # lost origin or origin is off
+            return
+
+    def receive_neighbors(self, neighbours, pubkey):
+        remote_id = keccak256(pubkey)
+        # response to find neighbours
+        self.events.put(Reply(remote_id, Neighbors.packet_type, neighbours))
+
+    def ping(self, node, callback=None):
+        ping = PingNode(self.endpoint, node.endpoint, time.time() + K_EXPIRATION)
         message = self.wrap_packet(ping)
-        print "sending " + str(ping)
-        self.sock.sendto(message, (endpoint.address.exploded, endpoint.udpPort))
+        msg_hash = message[:32]
+
+        def reply_call(pong):
+            if pong.echo == msg_hash:
+                if callback is not None:
+                    callback()
+
+                return True
+
+        self.events.put(Pending(node.node_id, Pong.packet_type, reply_call))
+        ep = (node.endpoint.address.exploded, node.endpoint.udpPort)
+        LOGGER.debug(">>> message[{}]:".format(ep))
+        LOGGER.debug(" sending {}".format(ping))
+        self.sock.sendto(message, ep)
+
+    def find_neighbors(self, node, target_key, callback=None):
+        node_id = node.node_id
+        if time.time() - self.last_ping_received.get(node_id, 0) > K_BOND_EXPIRATION:
+            self.ping(node)
+            self.events.put(Pending(node_id, PingNode.packet_type, lambda: True))
+
+        fn = FindNeighbors(target_key, time.time() + K_EXPIRATION)
+
+        def reply_call(neighbors):
+            for neighbor_node in neighbors.nodes:
+                reply_call.num_received += 1
+                reply_call.nodes.append(neighbor_node)
+
+            if reply_call.num_received >= K_BUCKET_SIZE:
+                for n in reply_call.nodes:
+                    self.add_table(n)
+                if callback is not None:
+                    callback(reply_call.nodes)
+
+                return True
+
+        # nonlocal variables
+        reply_call.nodes = []
+        reply_call.num_received = 0
+
+        self.events.put(Pending(node.node_id, Neighbors.packet_type, reply_call))
+        self.send(fn, node.endpoint)
 
     def send(self, packet, endpoint):
         message = self.wrap_packet(packet)
-        print "sending " + str(packet)
-        self.sock.sendto(message, (endpoint.address.exploded, endpoint.udpPort))
+        ep = (endpoint.address.exploded, endpoint.udpPort)
+        LOGGER.debug(">>> message[{}]:".format(ep))
+        LOGGER.debug(" sending {}".format(packet))
+        self.sock.sendto(message, ep)
+
+    def add_table(self, node):
+        self.table.add_node(node)
+
+
+def expired(packet):
+    return packet.timestamp < time.time()

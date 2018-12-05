@@ -1,32 +1,11 @@
 # -*- coding: utf8 -*-
-from pyeth.discovery import EndPoint, PingNode, Server, FindNeighbors, Node
-import time
+from pyeth.discovery import EndPoint, Server, Node
 import binascii
 
-bootnode_key = "1118980bf48b0a3640bdba04e0fe78b1add18e1cd99bf22d53daac1fd9972ad650df52176e7c7d89d1114cfef2bc23a2959aa54998a46afcf7d91809f0855082"
+boot_key = "669f45b66acf3b804c26ce13cfdd1f7e3d0ff4ed85060841b9af3af6dbfbacd05181e1c9363161446a307f3ca24e707856a01e4bf1eed5e1aefc14011a5c1c1c"
+# boot_endpoint = EndPoint(u'127.0.0.1', 30301, 30301)
+boot_endpoint = EndPoint(u'52.74.57.123', 30303, 30303)
+boot_node = Node(boot_endpoint, binascii.a2b_hex(boot_key))
 
-bootnode_endpoint = EndPoint(u'52.74.57.123',
-                             30303,
-                             30303)
-
-bootnode = Node(bootnode_endpoint,
-                binascii.a2b_hex(bootnode_key))
-
-# this is a fake ip address used in packets.
-my_endpoint = EndPoint(u'52.4.20.183', 30303, 30303)
-server = Server(my_endpoint)
-
-listen_thread = server.listen_thread()
-listen_thread.start()
-
-fn = FindNeighbors(bootnode.node, time.time() + 60)
-ping = PingNode(my_endpoint, bootnode.endpoint, time.time() + 60)
-
-# introduce self
-server.send(ping, bootnode.endpoint)
-# wait for pong-ping-pong
-time.sleep(3)
-# ask for neighbors
-server.send(fn, bootnode.endpoint)
-# wait for response
-time.sleep(3)
+server = Server([boot_node])
+server.run()
