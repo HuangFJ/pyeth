@@ -2,7 +2,7 @@
 import socket
 import gevent
 from gevent.queue import Queue
-from gevent.event import Event
+from gevent.event import Event, AsyncResult
 from gevent.select import select
 import time
 import struct
@@ -12,19 +12,8 @@ from table import RoutingTable
 from secp256k1 import PrivateKey, PublicKey
 from ipaddress import ip_address
 import binascii
-import logging
-import sys
-
-LOGGER = logging.getLogger()
-LOGGER.setLevel(logging.DEBUG)
-ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.DEBUG)
-LOGGER.addHandler(ch)
-
-K_REQUEST_TIMEOUT = 1.0
-K_BOND_EXPIRATION = 86400
-K_EXPIRATION = 20
-K_BUCKET_SIZE = 16
+from constants import LOGGER, BUCKET_SIZE, K_BOND_EXPIRATION, K_EXPIRATION, K_MAX_NEIGHBORS, K_REQUEST_TIMEOUT,\
+    RET_PENDING_OK, RET_PENDING_TIMEOUT
 
 
 class Pending(object):
@@ -33,6 +22,7 @@ class Pending(object):
         self.packet_type = packet_type
         self.callback = callback
         self.deadline = deadline
+        self.ret = AsyncResult()
 
 
 class Reply(object):
@@ -294,7 +284,7 @@ class Server(object):
         self.priv_key.deserialize(priv_key_serialized)
 
         # routing table
-        self.table = RoutingTable(Node(self.endpoint, pubkey_format(self.priv_key.pubkey)))
+        self.table = RoutingTable(Node(self.endpoint, pubkey_format(self.priv_key.pubkey)), self)
 
         # initialize UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -320,6 +310,7 @@ class Server(object):
                             event.matcher()
                         if pending.callback(event.data):
                             pending_list.remove(pending)
+                            pending.ret.set(RET_PENDING_OK)
 
             elif isinstance(event, Pending):
                 event.deadline = time.time() + K_REQUEST_TIMEOUT
@@ -334,6 +325,7 @@ class Server(object):
                     if dist > 0:
                         break
                     pending_list.remove(pending)
+                    pending.ret.set(RET_PENDING_TIMEOUT)
 
                 gevent.spawn_later(dist, lambda: self.events.put(TimeBomb()))
 
@@ -382,17 +374,17 @@ class Server(object):
             if ready[0]:
                 data, addr = self.sock.recvfrom(2048)
                 LOGGER.debug("<<< message[{}]:".format(addr))
-                self.receive(data, addr)
+                try:
+                    self.receive(data, addr)
+                except Exception, e:
+                    LOGGER.exception(e)
 
     def run(self):
         gevent.spawn(self.listen)
         gevent.spawn(self.poll)
 
-        def routine():
-            boot_node = self.boot_nodes[0]
-            self.find_neighbors(boot_node, boot_node.node_key)
-
-        gevent.spawn_later(1, routine)
+        boot_node = self.boot_nodes[0]
+        self.find_neighbors(boot_node, boot_node.node_key)
 
         # wait forever
         evt = Event()
@@ -435,6 +427,8 @@ class Server(object):
         packet_type = data[97]
         payload = rlp.decode(data[98:])
         if packet_type == PingNode.packet_type:
+            # fake ip in packet
+            payload[1][0] = addr[0]
             ping = PingNode.unpack(payload)
             if expired(ping):
                 return
@@ -451,7 +445,7 @@ class Server(object):
             if expired(fn):
                 return
             LOGGER.debug(" received {}".format(fn))
-            self.receive_find_neighbors(fn, pubkey)
+            self.receive_find_neighbors(fn, addr, pubkey)
         elif packet_type == Neighbors.packet_type:
             neighbours = Neighbors.unpack(payload)
             if expired(neighbours):
@@ -489,11 +483,27 @@ class Server(object):
 
         self.last_ping_received[remote_id] = time.time()
 
-    def receive_find_neighbors(self, fn, pubkey):
+    def receive_find_neighbors(self, fn, addr, pubkey):
         remote_id = keccak256(pubkey)
         if time.time() - self.last_pong_received.get(remote_id, 0) > K_BOND_EXPIRATION:
             # lost origin or origin is off
             return
+
+        target_id = keccak256(fn.target)
+        closest = self.table.closest(target_id, BUCKET_SIZE)
+
+        ns = Neighbors([], time.time() + K_EXPIRATION)
+        sent = False
+        for c in closest:
+            ns.nodes.append(c)
+
+            if len(ns.nodes) == K_MAX_NEIGHBORS:
+                self.send(ns, EndPoint(addr[0], addr[1], addr[1]))
+                ns.nodes = []
+                sent = True
+
+        if len(ns.nodes) > 0 or not sent:
+            self.send(ns, EndPoint(addr[0], addr[1], addr[1]))
 
     def receive_neighbors(self, neighbours, pubkey):
         remote_id = keccak256(pubkey)
@@ -512,17 +522,20 @@ class Server(object):
 
                 return True
 
-        self.events.put(Pending(node.node_id, Pong.packet_type, reply_call))
+        pending = Pending(node.node_id, Pong.packet_type, reply_call)
+        self.events.put(pending)
         ep = (node.endpoint.address.exploded, node.endpoint.udpPort)
         LOGGER.debug(">>> message[{}]:".format(ep))
         LOGGER.debug(" sending {}".format(ping))
         self.sock.sendto(message, ep)
 
+        return pending
+
     def find_neighbors(self, node, target_key, callback=None):
         node_id = node.node_id
         if time.time() - self.last_ping_received.get(node_id, 0) > K_BOND_EXPIRATION:
             self.ping(node)
-            self.events.put(Pending(node_id, PingNode.packet_type, lambda: True))
+            self.events.put(Pending(node_id, PingNode.packet_type, lambda _: True))
 
         fn = FindNeighbors(target_key, time.time() + K_EXPIRATION)
 
@@ -531,7 +544,7 @@ class Server(object):
                 reply_call.num_received += 1
                 reply_call.nodes.append(neighbor_node)
 
-            if reply_call.num_received >= K_BUCKET_SIZE:
+            if reply_call.num_received >= BUCKET_SIZE:
                 for n in reply_call.nodes:
                     self.add_table(n)
                 if callback is not None:
@@ -543,8 +556,11 @@ class Server(object):
         reply_call.nodes = []
         reply_call.num_received = 0
 
-        self.events.put(Pending(node.node_id, Neighbors.packet_type, reply_call))
+        pending = Pending(node.node_id, Neighbors.packet_type, reply_call)
+        self.events.put(pending)
         self.send(fn, node.endpoint)
+
+        return pending
 
     def send(self, packet, endpoint):
         message = self.wrap_packet(packet)
