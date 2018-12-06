@@ -17,6 +17,18 @@ from constants import LOGGER, BUCKET_SIZE, K_BOND_EXPIRATION, K_EXPIRATION, K_MA
 
 
 class Pending(object):
+    """
+    trigger while making a request like ping or find_neighbours, expecting a pong or neighbours response
+    from_id: the remote node id
+    packet_type: expecting response packet type
+    callback: invoked while response correctly, define: 
+        func(response packet) -> bool 
+            when the return bool is true, forgotten the request
+        
+    deadline: expire time of the request
+    ret: (RET_PENDING_OK, RET_PENDING_TIMEOUT) 
+        how this request is forgotten, it may be forgotten by response correctly or timeout
+    """
     def __init__(self, from_id, packet_type, callback, deadline=None):
         self.from_id = from_id
         self.packet_type = packet_type
@@ -26,6 +38,14 @@ class Pending(object):
 
 
 class Reply(object):
+    """
+    trigger while receive packet like pong or neighbours 
+    from_id: the remote node id
+    packet_type: response packet type
+    data: packet of pong or neighbours
+    matcher: invoked while the arrived response matches pending(request), define:
+        func()
+    """
     def __init__(self, from_id, packet_type, data, matcher=None):
         self.from_id = from_id
         self.packet_type = packet_type
@@ -309,6 +329,7 @@ class Server(object):
                         if event.matcher:
                             event.matcher()
                         if pending.callback(event.data):
+                            # forgotten pending after remote response correctly
                             pending_list.remove(pending)
                             pending.ret.set(RET_PENDING_OK)
 
@@ -324,6 +345,7 @@ class Server(object):
                     dist = pending.deadline - now
                     if dist > 0:
                         break
+                    # forgotten pending after timeout
                     pending_list.remove(pending)
                     pending.ret.set(RET_PENDING_TIMEOUT)
 
@@ -382,9 +404,6 @@ class Server(object):
     def run(self):
         gevent.spawn(self.listen)
         gevent.spawn(self.poll)
-
-        boot_node = self.boot_nodes[0]
-        self.find_neighbors(boot_node, boot_node.node_key)
 
         # wait forever
         evt = Event()
@@ -492,6 +511,7 @@ class Server(object):
         target_id = keccak256(fn.target)
         closest = self.table.closest(target_id, BUCKET_SIZE)
 
+        # sent neighbours in chunks
         ns = Neighbors([], time.time() + K_EXPIRATION)
         sent = False
         for c in closest:
@@ -511,6 +531,10 @@ class Server(object):
         self.events.put(Reply(remote_id, Neighbors.packet_type, neighbours))
 
     def ping(self, node, callback=None):
+        """
+        send a ping request to the given node and return instantly
+        invoke callback while reply arrives
+        """
         ping = PingNode(self.endpoint, node.endpoint, time.time() + K_EXPIRATION)
         message = self.wrap_packet(ping)
         msg_hash = message[:32]
@@ -531,7 +555,11 @@ class Server(object):
 
         return pending
 
-    def find_neighbors(self, node, target_key, callback=None):
+    def find_neighbors(self, node, target_key):
+        """
+        send a find neighbours request to the given node and 
+        waits until the node has sent up to k neighbours
+        """
         node_id = node.node_id
         if time.time() - self.last_ping_received.get(node_id, 0) > K_BOND_EXPIRATION:
             self.ping(node)
@@ -545,11 +573,6 @@ class Server(object):
                 reply_call.nodes.append(neighbor_node)
 
             if reply_call.num_received >= BUCKET_SIZE:
-                for n in reply_call.nodes:
-                    self.add_table(n)
-                if callback is not None:
-                    callback(reply_call.nodes)
-
                 return True
 
         # nonlocal variables
@@ -560,7 +583,10 @@ class Server(object):
         self.events.put(pending)
         self.send(fn, node.endpoint)
 
-        return pending
+        # block wait for reply
+        ret = pending.ret.get()
+        if ret == RET_PENDING_OK:
+            return reply_call.nodes
 
     def send(self, packet, endpoint):
         message = self.wrap_packet(packet)

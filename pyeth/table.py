@@ -1,9 +1,11 @@
 import time
 import gevent
 from gevent import time
+from gevent.queue import Queue
+from crypto import keccak256, int_to_big_endian
 import random
 from constants import LOGGER, BUCKET_NUMBER, RE_VALIDATE_INTERVAL, RET_PENDING_OK,\
-    BUCKET_SIZE, BUCKET_MIN_DISTANCE
+    BUCKET_SIZE, BUCKET_MIN_DISTANCE, K_MAX_KEY_VALUE, KAD_ALPHA, REFRESH_INTERVAL
 
 
 def push_node(collection, node, max_size):
@@ -19,11 +21,13 @@ def del_node(coll, node):
             return
 
 
-def find_farther_to_target_than(arr, t, n):
+def find_farther_to_target_than(arr, t, node):
+    n_id = node.node_id
     for c in arr:
+        c_id = c.node_id
         for i in range(len(t)):
-            tc = ord(t[i]) ^ ord(c[i])
-            tn = ord(t[i]) ^ ord(n[i])
+            tc = ord(t[i]) ^ ord(c_id[i])
+            tn = ord(t[i]) ^ ord(n_id[i])
             if tc > tn:
                 return c
             elif tc < tn:
@@ -35,12 +39,70 @@ class RoutingTable(object):
         self.buckets = [Bucket() for _ in range(BUCKET_NUMBER)]
         self.self_node = self_node
         self.server = server
+
         gevent.spawn(self.re_validate)
+        gevent.spawn(self.refresh)
 
     def lookup(self, target_key):
-        pass
+        target_id = keccak256(target_key)
+        closest = []
+        while not closest:
+            closest = self.closest(target_key, BUCKET_SIZE)
+
+            if not closest:
+                # add seed nodes
+                for bn in self.server.boot_nodes:
+                    self.add_node(bn)
+
+        asked = [self.self_node.node_id]
+        pending_queries = 0
+        reply_queue = Queue()
+        while True:
+            for n in closest:
+                if pending_queries >= KAD_ALPHA:
+                    break
+
+                if n.node_id not in asked:
+                    asked.append(n.node_id)
+                    pending_queries += 1
+                    gevent.spawn(self.find_neighbours, n, target_key, reply_queue)
+
+            if pending_queries == 0:
+                break
+
+            ns = reply_queue.get()
+            pending_queries -= 1
+
+            if ns:
+                for node in ns:
+                    farther = find_farther_to_target_than(closest, target_id, node)
+
+                    if farther:
+                        closest.remove(farther)
+
+                    if len(closest) < BUCKET_SIZE:
+                        closest.append(node)
+
+    def refresh(self):
+        assert self.server.boot_nodes, "no boot nodes"
+
+        # add seed nodes
+        for bn in self.server.boot_nodes:
+            self.add_node(bn)
+        # self lookup to discover neighbours
+        self.lookup(self.self_node.node_key)
+
+        for i in range(3):
+            node_key = int_to_big_endian(random.randint(0, K_MAX_KEY_VALUE))
+            self.lookup(node_key)
+
+        gevent.spawn_later(REFRESH_INTERVAL, self.refresh)
 
     def re_validate(self):
+        """
+        checks that the last node in a random bucket is still alive
+        and replace or delete it if it isn't
+        """
         while True:
             time.sleep(RE_VALIDATE_INTERVAL)
 
@@ -56,7 +118,7 @@ class RoutingTable(object):
                     break
             if last is not None:
                 pending = self.server.ping(last)
-                # block
+                # wait until reply this ping
                 ret = pending.ret.get()
                 bucket = self.buckets[bi]
                 if ret == RET_PENDING_OK:
@@ -124,6 +186,17 @@ class RoutingTable(object):
 
                 if len(arr) < num:
                     arr.append(node)
+
+        return arr
+
+    def find_neighbours(self, node, target_key, reply_queue):
+        ns = self.server.find_neighbors(node, target_key)
+
+        if ns:
+            for n in ns:
+                self.add_node(n)
+
+        reply_queue.put(ns)
 
 
 class Bucket(object):
