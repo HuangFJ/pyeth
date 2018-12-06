@@ -23,11 +23,11 @@ class Pending(object):
     packet_type: expecting response packet type
     callback: invoked while response correctly, define: 
         func(response packet) -> bool 
-            when the return bool is true, forgotten the request
+            when the return bool is true, terminal the request
         
     deadline: expire time of the request
     ret: (RET_PENDING_OK, RET_PENDING_TIMEOUT) 
-        how this request is forgotten, it may be forgotten by response correctly or timeout
+        how this request is terminal, it may be terminal by response correctly or timeout
     """
     def __init__(self, from_id, packet_type, callback, deadline=None):
         self.from_id = from_id
@@ -304,7 +304,7 @@ class Server(object):
         self.priv_key.deserialize(priv_key_serialized)
 
         # routing table
-        self.table = RoutingTable(Node(self.endpoint, pubkey_format(self.priv_key.pubkey)), self)
+        self.table = RoutingTable(Node(self.endpoint, pubkey_format(self.priv_key.pubkey)[1:]), self)
 
         # initialize UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -395,7 +395,7 @@ class Server(object):
             ready = select([self.sock], [], [], 1.0)
             if ready[0]:
                 data, addr = self.sock.recvfrom(2048)
-                LOGGER.debug("<<< message[{}]:".format(addr))
+
                 try:
                     self.receive(data, addr)
                 except Exception, e:
@@ -441,7 +441,7 @@ class Server(object):
         assert verified, "Signature invalid"
 
         pubkey = pubkey_format(pub)[1:]
-        LOGGER.debug(" remote PubKey {}".format(binascii.hexlify(pubkey)))
+        pubkey_hex = binascii.hexlify(pubkey)
 
         packet_type = data[97]
         payload = rlp.decode(data[98:])
@@ -451,25 +451,25 @@ class Server(object):
             ping = PingNode.unpack(payload)
             if expired(ping):
                 return
-            LOGGER.debug(" received {}".format(ping))
+            LOGGER.debug("<-- {}...@{}:{} {}".format(pubkey_hex[:7], addr[0], addr[1], ping))
             self.receive_ping(ping, msg_hash, addr, pubkey)
         elif packet_type == Pong.packet_type:
             pong = Pong.unpack(payload)
             if expired(pong):
                 return
-            LOGGER.debug(" received {}".format(pong))
+            LOGGER.debug("<-- {}...@{}:{} {}".format(pubkey_hex[:7], addr[0], addr[1], pong))
             self.receive_pong(pong, pubkey)
         elif packet_type == FindNeighbors.packet_type:
             fn = FindNeighbors.unpack(payload)
             if expired(fn):
                 return
-            LOGGER.debug(" received {}".format(fn))
+            LOGGER.debug("<-- {}...@{}:{} {}".format(pubkey_hex[:7], addr[0], addr[1], fn))
             self.receive_find_neighbors(fn, addr, pubkey)
         elif packet_type == Neighbors.packet_type:
             neighbours = Neighbors.unpack(payload)
             if expired(neighbours):
                 return
-            LOGGER.debug(" received {}".format(neighbours))
+            LOGGER.debug("<-- {}...@{}:{} {}".format(pubkey_hex[:7], addr[0], addr[1], neighbours))
             self.receive_neighbors(neighbours, pubkey)
         else:
             assert False, " Unknown message type: {}".format(packet_type)
@@ -549,8 +549,7 @@ class Server(object):
         pending = Pending(node.node_id, Pong.packet_type, reply_call)
         self.events.put(pending)
         ep = (node.endpoint.address.exploded, node.endpoint.udpPort)
-        LOGGER.debug(">>> message[{}]:".format(ep))
-        LOGGER.debug(" sending {}".format(ping))
+        LOGGER.debug("--> {}:{} {}".format(ep[0], ep[1], ping))
         self.sock.sendto(message, ep)
 
         return pending
@@ -562,8 +561,12 @@ class Server(object):
         """
         node_id = node.node_id
         if time.time() - self.last_ping_received.get(node_id, 0) > K_BOND_EXPIRATION:
-            self.ping(node)
-            self.events.put(Pending(node_id, PingNode.packet_type, lambda _: True))
+            # send a ping and wait for a pong
+            self.ping(node).ret.get()
+            wait_ping = Pending(node_id, PingNode.packet_type, lambda _: True)
+            self.events.put(wait_ping)
+            # wait for a ping
+            wait_ping.ret.get()
 
         fn = FindNeighbors(target_key, time.time() + K_EXPIRATION)
 
@@ -583,7 +586,7 @@ class Server(object):
         self.events.put(pending)
         self.send(fn, node.endpoint)
 
-        # block wait for reply
+        # block to wait for a reply
         ret = pending.ret.get()
         if ret == RET_PENDING_OK:
             return reply_call.nodes
@@ -591,8 +594,7 @@ class Server(object):
     def send(self, packet, endpoint):
         message = self.wrap_packet(packet)
         ep = (endpoint.address.exploded, endpoint.udpPort)
-        LOGGER.debug(">>> message[{}]:".format(ep))
-        LOGGER.debug(" sending {}".format(packet))
+        LOGGER.debug("--> {}:{} {}".format(ep[0], ep[1], packet))
         self.sock.sendto(message, ep)
 
     def add_table(self, node):

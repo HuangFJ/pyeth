@@ -4,8 +4,8 @@ from gevent import time
 from gevent.queue import Queue
 from crypto import keccak256, int_to_big_endian
 import random
-from constants import LOGGER, BUCKET_NUMBER, RE_VALIDATE_INTERVAL, RET_PENDING_OK,\
-    BUCKET_SIZE, BUCKET_MIN_DISTANCE, K_MAX_KEY_VALUE, KAD_ALPHA, REFRESH_INTERVAL
+from constants import LOGGER, BUCKET_NUMBER, RE_VALIDATE_INTERVAL, RET_PENDING_OK, \
+    BUCKET_SIZE, BUCKET_MIN_DISTANCE, K_MAX_KEY_VALUE, KAD_ALPHA, REFRESH_INTERVAL, K_PUBKEY_SIZE
 
 
 def push_node(collection, node, max_size):
@@ -40,6 +40,10 @@ class RoutingTable(object):
         self.self_node = self_node
         self.server = server
 
+        # add seed nodes
+        for bn in self.server.boot_nodes:
+            self.add_node(bn)
+
         gevent.spawn(self.re_validate)
         gevent.spawn(self.refresh)
 
@@ -47,7 +51,7 @@ class RoutingTable(object):
         target_id = keccak256(target_key)
         closest = []
         while not closest:
-            closest = self.closest(target_key, BUCKET_SIZE)
+            closest = self.closest(target_id, BUCKET_SIZE)
 
             if not closest:
                 # add seed nodes
@@ -86,17 +90,16 @@ class RoutingTable(object):
     def refresh(self):
         assert self.server.boot_nodes, "no boot nodes"
 
-        # add seed nodes
-        for bn in self.server.boot_nodes:
-            self.add_node(bn)
-        # self lookup to discover neighbours
-        self.lookup(self.self_node.node_key)
+        while True:
+            # self lookup to discover neighbours
+            self.lookup(self.self_node.node_key)
 
-        for i in range(3):
-            node_key = int_to_big_endian(random.randint(0, K_MAX_KEY_VALUE))
-            self.lookup(node_key)
+            for i in range(3):
+                random_int = random.randint(0, K_MAX_KEY_VALUE)
+                node_key = int_to_big_endian(random_int).rjust(K_PUBKEY_SIZE / 8, b'\x00')
+                self.lookup(node_key)
 
-        gevent.spawn_later(REFRESH_INTERVAL, self.refresh)
+            time.sleep(REFRESH_INTERVAL)
 
     def re_validate(self):
         """
@@ -117,9 +120,8 @@ class RoutingTable(object):
                     last = bucket.nodes.pop()
                     break
             if last is not None:
-                pending = self.server.ping(last)
-                # wait until reply this ping
-                ret = pending.ret.get()
+                # wait for a pong
+                ret = self.server.ping(last).ret.get()
                 bucket = self.buckets[bi]
                 if ret == RET_PENDING_OK:
                     # bump node
