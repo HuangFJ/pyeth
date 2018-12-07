@@ -152,7 +152,7 @@ class FindNeighbors(object):
         self.timestamp = timestamp
 
     def __str__(self):
-        return "(FN " + binascii.b2a_hex(self.target)[:7] + "... " + str(self.timestamp) + ")"
+        return "(FN " + binascii.b2a_hex(keccak256(self.target))[:8] + " " + str(self.timestamp) + ")"
 
     def pack(self):
         return [
@@ -210,12 +210,18 @@ class Neighbors(object):
 class Node(object):
     def __init__(self, endpoint, node_key):
         self.endpoint = endpoint
-        self.node_key = node_key
-        self.node_id = keccak256(self.node_key)
+        self.node_key = None
+        self.node_id = None
         self.added_time = Node
 
+        self.set_pubkey(node_key)
+
+    def set_pubkey(self, pubkey):
+        self.node_key = pubkey
+        self.node_id = keccak256(self.node_key)
+
     def __str__(self):
-        return "(N " + binascii.b2a_hex(self.node_key)[:7] + "...)"
+        return "(N " + binascii.b2a_hex(self.node_id)[:8] + ")"
 
     def pack(self):
         packed = self.endpoint.pack()

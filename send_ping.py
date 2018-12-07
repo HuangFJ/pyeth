@@ -38,7 +38,7 @@ main_boots = [
 ]
 
 nodes = []
-for n in test_boots:
+for n in main_boots:
     info = urlparse(n)
     nodes.append(Node(EndPoint(info.hostname, info.port, info.port), binascii.a2b_hex(info.username)))
 

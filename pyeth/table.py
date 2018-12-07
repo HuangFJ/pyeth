@@ -120,7 +120,7 @@ class RoutingTable(object):
                     last = bucket.nodes.pop()
                     break
             if last is not None:
-                LOGGER.debug('re validating node {}'.format(last))
+                LOGGER.debug('      {} re validating node {}'.format(time.time(), last))
                 # wait for a pong
                 ret = self.server.ping(last).get()
                 bucket = self.buckets[bi]
@@ -144,6 +144,7 @@ class RoutingTable(object):
             if n.node_id == node.node_id:
                 bucket.nodes.remove(n)
                 bucket.nodes.insert(0, node)
+                LOGGER.debug('      {} bump {} in bucket #{}'.format(time.time(), node, self.buckets.index(bucket)))
                 return
         # bucket is full, push node to replace cache
         if len(bucket.nodes) >= BUCKET_SIZE:
@@ -152,9 +153,11 @@ class RoutingTable(object):
                     return
 
             push_node(bucket.replace_cache, node, BUCKET_SIZE)
+            LOGGER.debug('      {} push {} to replacement #{}'.format(time.time(), node, self.buckets.index(bucket)))
             return
         # push node to bucket, delete node from replace cache
         push_node(bucket.nodes, node, BUCKET_SIZE)
+        LOGGER.debug('      {} push {} to bucket #{}'.format(time.time(), node, self.buckets.index(bucket)))
         del_node(bucket.replace_cache, node)
         node.added_time = time.time()
 
