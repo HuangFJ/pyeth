@@ -4,7 +4,7 @@ from gevent import time
 from gevent.queue import Queue
 from crypto import keccak256, int_to_big_endian
 import random
-from constants import LOGGER, BUCKET_NUMBER, RE_VALIDATE_INTERVAL, RET_PENDING_OK, \
+from constants import LOGGER, BUCKET_NUMBER, RE_VALIDATE_INTERVAL, \
     BUCKET_SIZE, BUCKET_MIN_DISTANCE, K_MAX_KEY_VALUE, KAD_ALPHA, REFRESH_INTERVAL, K_PUBKEY_SIZE
 
 
@@ -120,10 +120,11 @@ class RoutingTable(object):
                     last = bucket.nodes.pop()
                     break
             if last is not None:
+                LOGGER.debug('re validating node {}'.format(last))
                 # wait for a pong
-                ret = self.server.ping(last).ret.get()
+                ret = self.server.ping(last).get()
                 bucket = self.buckets[bi]
-                if ret == RET_PENDING_OK:
+                if ret:
                     # bump node
                     bucket.nodes.insert(0, last)
                 else:
