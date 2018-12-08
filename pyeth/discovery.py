@@ -61,8 +61,8 @@ class Pending(Greenlet):
                 chunks.append(packet)
             except Empty:
                 hex_id = binascii.hexlify(self.from_id)
-                LOGGER.warning('<-//- {} {}@{}:{} ({}) timeout'.format(
-                    time.time(),
+                LOGGER.warning("{:5} {}@{}:{} ({}) timeout".format(
+                    '<-//-',
                     hex_id[:8],
                     self.ep[0],
                     self.ep[1],
@@ -140,7 +140,7 @@ class Server(object):
             time.sleep(K_REQUEST_TIMEOUT)
 
     def listen(self):
-        LOGGER.info("listening...")
+        LOGGER.info("{:5} listening...".format(''))
         while True:
             ready = select([self.sock], [], [], 1.0)
             if ready[0]:
@@ -190,25 +190,27 @@ class Server(object):
             ping = PingNode.unpack(payload)
             if expired(ping):
                 return
-            LOGGER.debug("<---- {} {}@{}:{} (Ping)".format(time.time(), hex_id[:8], addr[0], addr[1]))
+            LOGGER.info("{:5} {}@{}:{} (Ping)".format('<----', hex_id[:8], addr[0], addr[1]))
             self.receive_ping(addr, pubkey, ping, msg_hash)
         elif packet_type == Pong.packet_type:
             pong = Pong.unpack(payload)
             if expired(pong):
                 return
-            LOGGER.debug("<---- {} {}@{}:{} (Pong)".format(time.time(), hex_id[:8], addr[0], addr[1]))
+            LOGGER.info("{:5} {}@{}:{} (Pong)".format('<----', hex_id[:8], addr[0], addr[1]))
             self.receive_pong(addr, pubkey, pong)
         elif packet_type == FindNeighbors.packet_type:
             fn = FindNeighbors.unpack(payload)
             if expired(fn):
                 return
-            LOGGER.debug("<---- {} {}@{}:{} (FN)".format(time.time(), hex_id[:8], addr[0], addr[1], fn))
+            LOGGER.info("{:5} {}@{}:{} (FN {})".format(
+                '<----', hex_id[:8], addr[0], addr[1], binascii.hexlify(keccak256(fn.target))[:8])
+            )
             self.receive_find_neighbors(addr, pubkey, fn)
         elif packet_type == Neighbors.packet_type:
             neighbours = Neighbors.unpack(payload)
             if expired(neighbours):
                 return
-            LOGGER.debug("<---- {} {}@{}:{} {}".format(time.time(), hex_id[:8], addr[0], addr[1], neighbours))
+            LOGGER.info("{:5} {}@{}:{} {}".format('<----', hex_id[:8], addr[0], addr[1], neighbours))
             self.receive_neighbors(addr, pubkey, neighbours)
         else:
             assert False, " Unknown message type: {}".format(packet_type)
@@ -231,8 +233,8 @@ class Server(object):
         node_to = Node(pong.to, pubkey)
         # sending Pong response
         self.send_sock(pong, node_to)
-        LOGGER.debug("----> {} {}@{}:{} (Pong)".format(
-            time.time(), binascii.hexlify(node_to.node_id)[:8], addr[0], ping.endpoint_from.udpPort)
+        LOGGER.info("{:5} {}@{}:{} (Pong)".format(
+            '---->', binascii.hexlify(node_to.node_id)[:8], addr[0], ping.endpoint_from.udpPort)
         )
 
         self.handle_reply(addr, pubkey, PingNode.packet_type, ping)
@@ -263,16 +265,16 @@ class Server(object):
 
             if len(ns.nodes) == K_MAX_NEIGHBORS:
                 self.send_sock(ns, node_to)
-                LOGGER.debug("----> {} {}@{}:{} {}".format(
-                    time.time(), binascii.hexlify(node_to.node_id)[:8], addr[0], addr[1], ns
+                LOGGER.info("{:5} {}@{}:{} {}".format(
+                    '---->', binascii.hexlify(node_to.node_id)[:8], addr[0], addr[1], ns
                 ))
                 ns.nodes = []
                 sent = True
 
         if len(ns.nodes) > 0 or not sent:
             self.send_sock(ns, node_to)
-            LOGGER.debug("----> {} {}@{}:{} {}".format(
-                time.time(), binascii.hexlify(node_to.node_id)[:8], addr[0], addr[1], ns
+            LOGGER.info("{:5} {}@{}:{} {}".format(
+                '---->', binascii.hexlify(node_to.node_id)[:8], addr[0], addr[1], ns
             ))
 
     def receive_neighbors(self, addr, pubkey, neighbours):
@@ -289,8 +291,8 @@ class Server(object):
                     pending.emit(packet)
                     match_callback and match_callback()
                 elif pending.ep is not None and pending.ep == addr:
-                    LOGGER.warning('      {} {}@{}:{} mismatch request id {}'.format(
-                        time.time(),
+                    LOGGER.warning('{:5} {}@{}:{} mismatch request {}'.format(
+                        '',
                         binascii.hexlify(remote_id)[:8],
                         addr[0],
                         addr[1],
@@ -305,8 +307,8 @@ class Server(object):
                     #             node.set_pubkey(pubkey)
 
         if not is_match:
-            LOGGER.warning('      {} {}@{}:{} unsolicited reply {}'.format(
-                time.time(), binascii.hexlify(remote_id)[:8], addr[0], addr[1], packet
+            LOGGER.warning('{:5} {}@{}:{} unsolicited response {}'.format(
+                '', binascii.hexlify(remote_id)[:8], addr[0], addr[1], PACKET_TYPES.get(packet.packet_type)
             ))
 
     def ping(self, node, callback=None):
@@ -327,8 +329,8 @@ class Server(object):
 
         ep = (node.endpoint.address.exploded, node.endpoint.udpPort)
         self.sock.sendto(message, ep)
-        LOGGER.debug("----> {} {}@{}:{} (Ping)".format(
-            time.time(), binascii.hexlify(node.node_id)[:8], ep[0], ep[1])
+        LOGGER.info("{:5} {}@{}:{} (Ping)".format(
+            '---->', binascii.hexlify(node.node_id)[:8], ep[0], ep[1])
         )
 
         return self.add_pending(Pending(node, Pong.packet_type, reply_call))
@@ -357,8 +359,8 @@ class Server(object):
 
         self.send_sock(fn, node)
         ep = (node.endpoint.address.exploded, node.endpoint.udpPort)
-        LOGGER.debug("----> {} {}@{}:{} (FN {})".format(
-            time.time(),
+        LOGGER.info("{:5} {}@{}:{} (FN {})".format(
+            '---->',
             binascii.hexlify(node.node_id)[:8],
             ep[0],
             ep[1],

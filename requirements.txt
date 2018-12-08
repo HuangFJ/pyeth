@@ -4,6 +4,7 @@ sphinx_rtd_theme
 nose
 coverage
 pypi-publisher
+coloredlogs
 cffi==1.10.0
 ipaddress==1.0.18
 pycparser==2.18

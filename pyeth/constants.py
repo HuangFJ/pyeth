@@ -1,5 +1,5 @@
 import logging
-import sys
+import coloredlogs
 
 KAD_ALPHA = 3
 BUCKET_SIZE = 16
@@ -9,11 +9,8 @@ BUCKET_MIN_DISTANCE = KAD_ID_SIZE - BUCKET_NUMBER
 RE_VALIDATE_INTERVAL = 10
 REFRESH_INTERVAL = 3
 
+coloredlogs.install(level='DEBUG', datefmt='%Y-%m-%d %H:%M:%S.%f', fmt='%(asctime)s %(message)s')
 LOGGER = logging.getLogger()
-LOGGER.setLevel(logging.DEBUG)
-ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.DEBUG)
-LOGGER.addHandler(ch)
 
 K_REQUEST_TIMEOUT = 1.0
 K_BOND_EXPIRATION = 86400
