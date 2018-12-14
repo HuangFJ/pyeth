@@ -1,33 +1,30 @@
-Ethereum for Python
-===============================
+## Ethereum for Python
 
 version number: 0.0.1
+
 author: Jon Huang
 
-Overview
---------
+### Overview
 
 full implementation of the Ethereum protocol from scratch for python
 
-Installation / Usage
---------------------
-
-    $ pip install -r requirements.txt
-    $ python app.py
-
+### Installation / Usage
+```bash
+$ pip install -r requirements.txt
+$ python app.py
+```
     
-TODO List
-------------
+### TODO List
 - [x] Ping(https://www.jianshu.com/p/b72b4eb259b8)
 - [x] Pong(https://www.jianshu.com/p/be885d33c156)
 - [x] FindNeighbors and Neighbors(https://www.jianshu.com/p/6b93267a7877)
 - [x] Routing(https://www.jianshu.com/p/2db0927ace93)
-- [] Sync Blockchain
+- [ ] Sync Blockchain
 
-Example
--------
+### Example
+```bash
 $ python app.py
-```
+
 2018-12-14 20:37:39.778       push (N 930cf49c) to bucket #14
 2018-12-14 20:37:39.778       push (N 674085f6) to bucket #16
 2018-12-14 20:37:39.778       push (N 009be51d) to bucket #16
