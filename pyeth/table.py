@@ -131,7 +131,8 @@ class RoutingTable(object):
                     # pick a replacement
                     if len(bucket.replace_cache) > 0:
                         r = bucket.replace_cache.pop(random.randint(0, len(bucket.replace_cache) - 1))
-                        bucket.nodes.append(r)
+                        if r:
+                            bucket.nodes.append(r)
 
     def add_node(self, node):
         bucket = self.get_bucket(node)
