@@ -78,6 +78,14 @@ class Pending(Greenlet):
 
             try:
                 if self._callback(chunks):
+                    hex_id = binascii.hexlify(self.from_id)
+                    LOGGER.info("{:5} {}@{}:{} ({}) ok".format(
+                        '<----',
+                        hex_id[:8],
+                        self.ep[0],
+                        self.ep[1],
+                        PACKET_TYPES.get(self._packet_type)
+                    ))
                     # job done
                     self._box = None
                     return chunks
@@ -190,27 +198,21 @@ class Server(object):
             ping = PingNode.unpack(payload)
             if expired(ping):
                 return
-            LOGGER.info("{:5} {}@{}:{} (Ping)".format('<----', hex_id[:8], addr[0], addr[1]))
             self.receive_ping(addr, pubkey, ping, msg_hash)
         elif packet_type == Pong.packet_type:
             pong = Pong.unpack(payload)
             if expired(pong):
                 return
-            LOGGER.info("{:5} {}@{}:{} (Pong)".format('<----', hex_id[:8], addr[0], addr[1]))
             self.receive_pong(addr, pubkey, pong)
         elif packet_type == FindNeighbors.packet_type:
             fn = FindNeighbors.unpack(payload)
             if expired(fn):
                 return
-            LOGGER.info("{:5} {}@{}:{} (FN {})".format(
-                '<----', hex_id[:8], addr[0], addr[1], binascii.hexlify(keccak256(fn.target))[:8])
-            )
             self.receive_find_neighbors(addr, pubkey, fn)
         elif packet_type == Neighbors.packet_type:
             neighbours = Neighbors.unpack(payload)
             if expired(neighbours):
                 return
-            LOGGER.info("{:5} {}@{}:{} {}".format('<----', hex_id[:8], addr[0], addr[1], neighbours))
             self.receive_neighbors(addr, pubkey, neighbours)
         else:
             assert False, " Unknown message type: {}".format(packet_type)
@@ -291,7 +293,7 @@ class Server(object):
                     pending.emit(packet)
                     match_callback and match_callback()
                 elif pending.ep is not None and pending.ep == addr:
-                    LOGGER.warning('{:5} {}@{}:{} mismatch request {}'.format(
+                    LOGGER.error('{:5} {}@{}:{} mismatch request {}'.format(
                         '',
                         binascii.hexlify(remote_id)[:8],
                         addr[0],
@@ -307,8 +309,8 @@ class Server(object):
                     #             node.set_pubkey(pubkey)
 
         if not is_match:
-            LOGGER.warning('{:5} {}@{}:{} unsolicited response {}'.format(
-                '', binascii.hexlify(remote_id)[:8], addr[0], addr[1], PACKET_TYPES.get(packet.packet_type)
+            LOGGER.warning('{:5} {}@{}:{} ({}) unsolicited response'.format(
+                '<-//-', binascii.hexlify(remote_id)[:8], addr[0], addr[1], PACKET_TYPES.get(packet.packet_type)
             ))
 
     def ping(self, node, callback=None):
@@ -326,8 +328,6 @@ class Server(object):
                     callback()
 
                 return True
-            else:
-                LOGGER.warning('{:5} unsolicited (Pong), invalid echo'.format(''))
 
         ep = (node.endpoint.address.exploded, node.endpoint.udpPort)
         pending = self.add_pending(Pending(node, Pong.packet_type, reply_call))
@@ -345,10 +345,10 @@ class Server(object):
         """
         node_id = node.node_id
         if time.time() - self.last_ping_received.get(node_id, 0) > K_BOND_EXPIRATION:
-            # send a ping and wait for a pong
-            self.ping(node)
-            # wait for a ping
-            self.add_pending(Pending(node, PingNode.packet_type, lambda _: True)).join()
+            send_ping = self.ping(node)
+            receive_ping = self.add_pending(Pending(node, PingNode.packet_type, lambda _: True))
+            # wait until endpoint proof is finished
+            gevent.joinall([send_ping, receive_ping])
 
         fn = FindNeighbors(target_key, time.time() + K_EXPIRATION)
 
