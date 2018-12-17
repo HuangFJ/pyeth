@@ -326,14 +326,17 @@ class Server(object):
                     callback()
 
                 return True
+            else:
+                LOGGER.warning('{:5} unsolicited (Pong), invalid echo'.format(''))
 
         ep = (node.endpoint.address.exploded, node.endpoint.udpPort)
+        pending = self.add_pending(Pending(node, Pong.packet_type, reply_call))
         self.sock.sendto(message, ep)
         LOGGER.info("{:5} {}@{}:{} (Ping)".format(
             '---->', binascii.hexlify(node.node_id)[:8], ep[0], ep[1])
         )
 
-        return self.add_pending(Pending(node, Pong.packet_type, reply_call))
+        return pending
 
     def find_neighbors(self, node, target_key):
         """
@@ -343,7 +346,7 @@ class Server(object):
         node_id = node.node_id
         if time.time() - self.last_ping_received.get(node_id, 0) > K_BOND_EXPIRATION:
             # send a ping and wait for a pong
-            self.ping(node).join()
+            self.ping(node)
             # wait for a ping
             self.add_pending(Pending(node, PingNode.packet_type, lambda _: True)).join()
 
@@ -357,6 +360,7 @@ class Server(object):
             if num_received >= BUCKET_SIZE:
                 return True
 
+        pending = self.add_pending(Pending(node, Neighbors.packet_type, reply_call, timeout=2))
         self.send_sock(fn, node)
         ep = (node.endpoint.address.exploded, node.endpoint.udpPort)
         LOGGER.info("{:5} {}@{}:{} (FN {})".format(
@@ -367,7 +371,7 @@ class Server(object):
             binascii.hexlify(keccak256(fn.target))[:8])
         )
         # block to wait for neighbours
-        ret = self.add_pending(Pending(node, Neighbors.packet_type, reply_call, timeout=3)).get()
+        ret = pending.get()
         if ret:
             neighbor_nodes = []
             for chunk in ret:
